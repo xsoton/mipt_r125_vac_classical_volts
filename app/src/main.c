@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <math.h>
 
 #include <gpib/ib.h>
 
@@ -23,12 +24,66 @@
 
 // === time
 #define STEP_DELAY 1.5e6 // us
+// #define STEP_DELAY 1.0e6 // us
 
 // === pps
 #define VOLTAGE_MIN 0.0
-#define VOLTAGE_MAX 10.0
-#define VOLTAGE_STEP 0.1
-#define CURRENT_MAX 0.1
+#define VOLTAGE_MAX 6.0
+#define VOLTAGE_STEP 0.02
+// #define VOLTAGE_MAX 10.0
+// #define VOLTAGE_STEP 0.05
+#define CURRENT_MAX 0.001
+
+// === vm
+#define V_100mV 0
+#define V_1V    1
+#define V_10V   2
+#define V_100V  3
+
+double V_hi[4] = {0.095, 0.95, 9.5, 95.0};
+double V_lo[4] = {0.085, 0.85, 8.5, 85.0};
+
+int V_range = V_100mV;
+
+// returns new range
+int V_check_range(int range, double V)
+{
+	if ((range < 0) || (range > 3))
+	{
+		return -1;
+	}
+
+	if (range == 0)
+	{
+		if (fabs(V) <= V_hi[range])
+		{
+			return range;
+		}
+		else
+		{
+			range++;
+		}
+	}
+
+	while((range >= 1) && (range <=3))
+	{
+		if (fabs(V) < V_lo[range-1])
+		{
+			range--;
+			continue;
+		}
+
+		if (fabs(V) > V_hi[range])
+		{
+			range++;
+			continue;
+		}
+
+		break;
+	}
+
+	return range;
+}
 
 // === threads
 void *commander(void *);
@@ -188,6 +243,8 @@ void *worker(void *arg)
 	FILE  *gp;
 	char   buf[100];
 
+	int new_V_range;
+
 	// === first we are connecting to instruments
 	// r = open(HANTEK_TMC, O_RDWR);
 	// if(r == -1)
@@ -218,15 +275,16 @@ void *worker(void *arg)
 	// === init pps
 	gpib_write(pps_fd, "output 0");
 	gpib_write(pps_fd, "instrument:nselect 1");
-	gpib_write(pps_fd, "voltage:limit 11V");
+	gpib_write(pps_fd, "voltage:limit 10.1V");
 	gpib_write(pps_fd, "voltage 0.0");
-	gpib_write(pps_fd, "current 0.1");
+	gpib_write(pps_fd, "current 0.01");
 	gpib_write(pps_fd, "channel:output 1");
 	// gpib_print_error(pps_fd);
 
 	// === init vm
 	gpib_write(vm_fd, "function \"voltage:dc\"");
-	gpib_write(vm_fd, "voltage:dc:range:auto on");
+	gpib_write(vm_fd, "voltage:dc:range:auto off");
+	gpib_write(vm_fd, "voltage:dc:range 0.1");
 	gpib_write(vm_fd, "voltage:dc:nplcycles 10");
 	gpib_write(vm_fd, "trigger:source immediate");
 	gpib_write(vm_fd, "trigger:delay:auto off");
@@ -279,7 +337,7 @@ void *worker(void *arg)
 	// === prepare gnuplot
 	r = fprintf(gp,
 		"set term qt noraise\n"
-		"set xrange [0:10]\n"
+		"set xrange [0:]\n"
 		"set xlabel \"Sample voltage, V\"\n"
 		"set ylabel \"Voltage, V\"\n"
 	);
@@ -356,6 +414,34 @@ void *worker(void *arg)
 			fprintf(stderr, "# E: Unable to print to gp (%s)\n", strerror(r));
 			set_run(0);
 			break;
+		}
+
+		new_V_range = V_check_range(V_range, vm_voltage);
+		//fprintf(stderr, "# D: V_range = %d, vm_voltage = %le, new_V_range = %d\n", V_range, vm_voltage, new_V_range);
+		if (new_V_range == -1)
+		{
+			set_run(0);
+			break;
+		}
+
+		if (new_V_range != V_range)
+		{
+			V_range = new_V_range;
+			switch(V_range)
+			{
+				case V_100mV:
+					gpib_write(vm_fd, "voltage:dc:range 0.1");
+					break;
+				case V_1V:
+					gpib_write(vm_fd, "voltage:dc:range 1");
+					break;
+				case V_10V:
+					gpib_write(vm_fd, "voltage:dc:range 10");
+					break;
+				case V_100V:
+					gpib_write(vm_fd, "voltage:dc:range 100");
+					break;
+			}
 		}
 
 		vac_index++;
